@@ -103,11 +103,33 @@ class SimpleIntuitionNetwork:
 
 class NeuralIntuitionNet:
     """
-    Neural network-based intuition network (placeholder for Phase 2).
+    Neural network-based intuition network.
+    
+    This is a convenience wrapper around the full IntuitionNetwork
+    implementation in intuition_network.py.
     """
     
     def __init__(self, input_dim: int = 384, hidden_dim: int = 128, num_strategies: int = 4):
-        self.input_dim = input_dim
-        self.num_strategies = num_strategies
-        # Actual implementation would use PyTorch
-        raise NotImplementedError("NeuralIntuitionNet will be implemented in Phase 2")
+        from .intuition_network import IntuitionNetwork
+        self._net = IntuitionNetwork(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            num_strategies=num_strategies,
+            memory_query_dim=input_dim,
+        )
+        self._net.setup_optimizer()
+    
+    def predict(self, problem_embedding):
+        """Predict the best strategy for a given problem."""
+        prediction = self._net.predict(
+            list(problem_embedding) if not isinstance(problem_embedding, list) else problem_embedding
+        )
+        return prediction.strategy_id, prediction.confidence, prediction.all_scores
+    
+    def update(self, problem_embedding, strategy_id: str, reward: float, lr: float = 0.01):
+        """Update strategy based on reward."""
+        self._net.update(
+            query_embedding=list(problem_embedding) if not isinstance(problem_embedding, list) else problem_embedding,
+            strategy_id=strategy_id,
+            reward=reward,
+        )

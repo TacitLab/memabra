@@ -95,6 +95,7 @@ class MemabraAgent:
         self.current_conversation_id: Optional[str] = None
         self.conversation_history: List[Dict] = []
         self.last_interaction_id: Optional[str] = None
+        self._interaction_log: List[Dict] = []  # 交互记录，用于反馈学习
         
         # 统计
         self.stats = {
@@ -148,6 +149,8 @@ class MemabraAgent:
                                   len(memories.get('procedural', [])),
             'assistant_response': response,
         }
+        
+        self._interaction_log.append(interaction)
         
         self.conversation_history.append({
             'role': 'user',
@@ -213,23 +216,27 @@ class MemabraAgent:
             conversation_history=self.conversation_history
         )
         
-        # 找到上一条交互记录
-        last_interaction = None
+        # 找到上一条用户输入并生成 embedding 用于网络更新
+        last_user_input = None
+        last_strategy = None
         for turn in reversed(self.conversation_history[:-1]):
-            if turn.get('role') == 'assistant':
-                # 找到对应的 embedding
-                for i, inter in enumerate(self.conversation_history):
-                    if inter.get('role') == 'user' and i > 0:
-                        prev = self.conversation_history[i-1]
-                        if prev.get('role') == 'assistant':
-                            # 这就是我们要找的交互
-                            pass
+            if turn.get('role') == 'user':
+                last_user_input = turn['content']
+                break
         
-        # 简化：直接从最近的用户输入找对应的 query_embedding
-        # 实际应用中应该维护一个交互映射表
+        # 从交互历史中找到对应的策略
+        if last_user_input and hasattr(self, '_interaction_log') and self._interaction_log:
+            last_record = self._interaction_log[-1]
+            last_strategy = last_record.get('strategy_used')
         
-        # 更新直觉网络
-        # 注意：这里需要获取上一条的 query_embedding，简化处理
+        # 如果找到了上一条交互，更新直觉网络
+        if last_user_input and last_strategy:
+            query_emb = self.embedder(last_user_input)
+            self.intuition.update(
+                query_embedding=query_emb,
+                strategy_id=last_strategy,
+                reward=feedback_signal.reward
+            )
         
         result = {
             'feedback_type': feedback_signal.signal_type.name,
@@ -264,7 +271,7 @@ class MemabraAgent:
         )
         
         return {
-            'loss': stats['loss'],
+            'loss': stats['policy_loss'],
             'log_prob': stats['log_prob'],
             'temperature': stats['temperature'],
             'total_updates': self.intuition.training_stats['updates']
@@ -287,6 +294,7 @@ class MemabraAgent:
         """重置对话状态。"""
         self.conversation_history = []
         self.last_interaction_id = None
+        self._interaction_log = []
 
 
 def demo():

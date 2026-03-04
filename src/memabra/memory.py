@@ -234,7 +234,7 @@ class HierarchicalMemory:
             # Prioritize episodic memory (past interactions)
             if query_emb:
                 results['episodic'] = self.episodic.search(query_emb, top_k)
-            results['semantic'] = self.semantic.search(query_emb, top_k // 2)
+                results['semantic'] = self.semantic.search(query_emb, top_k // 2)
         
         elif strategy_id == 'tool_use':
             # Prioritize procedural memory (skills)
@@ -283,18 +283,88 @@ class HierarchicalMemory:
         with open(path, 'r') as f:
             data = json.load(f)
         
-        # TODO: Implement loading with type reconstruction
-        pass
+        # Type reconstruction map
+        type_map = {
+            'episodic': EpisodicMemory,
+            'semantic': SemanticMemory,
+            'procedural': ProceduralMemory,
+            'lesson': EpisodicMemory,
+            'base': Memory,
+        }
+        
+        store_map = {
+            'episodic': self.episodic,
+            'semantic': self.semantic,
+            'procedural': self.procedural,
+        }
+        
+        for store_key, entries in data.items():
+            store = store_map.get(store_key)
+            if store is None:
+                continue
+            for entry in entries:
+                mem_type = entry.get('type', 'base')
+                cls = type_map.get(mem_type, Memory)
+                
+                # Build base fields
+                kwargs = {
+                    'id': entry.get('id', str(uuid.uuid4())),
+                    'content': entry.get('content', ''),
+                    'embedding': entry.get('embedding'),
+                    'timestamp': datetime.fromisoformat(entry['timestamp']) if 'timestamp' in entry else datetime.utcnow(),
+                    'metadata': entry.get('metadata', {}),
+                    'strength': entry.get('strength', 1.0),
+                    'access_count': entry.get('access_count', 0),
+                }
+                
+                # Add type-specific fields
+                if cls == EpisodicMemory:
+                    kwargs['outcome'] = entry.get('metadata', {}).get('outcome')
+                    kwargs['strategy_used'] = entry.get('metadata', {}).get('strategy_used')
+                elif cls == SemanticMemory:
+                    kwargs['subject'] = entry.get('metadata', {}).get('subject', '')
+                    kwargs['predicate'] = entry.get('metadata', {}).get('predicate', '')
+                    kwargs['object'] = entry.get('metadata', {}).get('object', '')
+                    kwargs['source'] = entry.get('metadata', {}).get('source', '')
+                    kwargs['confidence'] = entry.get('metadata', {}).get('confidence', 0.5)
+                elif cls == ProceduralMemory:
+                    kwargs['name'] = entry.get('metadata', {}).get('name', '')
+                    kwargs['trigger_patterns'] = entry.get('metadata', {}).get('trigger_patterns', [])
+                    kwargs['action'] = entry.get('metadata', {}).get('action', '')
+                    kwargs['success_rate'] = entry.get('metadata', {}).get('success_rate', 0.0)
+                    kwargs['avg_reward'] = entry.get('metadata', {}).get('avg_reward', 0.0)
+                
+                memory = cls(**kwargs)
+                store.add(memory)
     
     def _memory_to_dict(self, memory: Memory) -> Dict:
         """Convert memory to dictionary."""
-        return {
+        result = {
             'id': memory.id,
             'type': getattr(memory, 'type', 'base'),
             'content': memory.content,
             'embedding': memory.embedding,
             'timestamp': memory.timestamp.isoformat(),
-            'metadata': memory.metadata,
+            'metadata': dict(memory.metadata),
             'strength': memory.strength,
             'access_count': memory.access_count,
         }
+        
+        # Persist type-specific fields inside metadata for reconstruction
+        if isinstance(memory, EpisodicMemory):
+            result['metadata']['outcome'] = memory.outcome
+            result['metadata']['strategy_used'] = memory.strategy_used
+        elif isinstance(memory, SemanticMemory):
+            result['metadata']['subject'] = memory.subject
+            result['metadata']['predicate'] = memory.predicate
+            result['metadata']['object'] = memory.object
+            result['metadata']['source'] = memory.source
+            result['metadata']['confidence'] = memory.confidence
+        elif isinstance(memory, ProceduralMemory):
+            result['metadata']['name'] = memory.name
+            result['metadata']['trigger_patterns'] = memory.trigger_patterns
+            result['metadata']['action'] = memory.action
+            result['metadata']['success_rate'] = memory.success_rate
+            result['metadata']['avg_reward'] = memory.avg_reward
+        
+        return result

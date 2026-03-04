@@ -173,8 +173,9 @@ class DelayedRewardAssigner:
     Uses n-step return to distribute final outcome back to earlier steps.
     """
     
-    def __init__(self, gamma: float = 0.9):
+    def __init__(self, gamma: float = 0.9, embedding_fn=None):
         self.gamma = gamma  # Discount factor
+        self.embed = embedding_fn
     
     def assign_rewards(self, conversation: List[Dict]) -> List[Tuple[Dict, float]]:
         """
