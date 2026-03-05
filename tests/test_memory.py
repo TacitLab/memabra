@@ -195,3 +195,222 @@ class TestHierarchicalMemory:
         assert len(hm2.episodic.memories) == 1
         assert len(hm2.semantic.memories) == 1
         assert len(hm2.procedural.memories) == 1
+
+
+class TestActionStore:
+    """Tests for ActionStore (broad-sense memory)."""
+
+    def _sample_chain(self):
+        return [
+            {
+                "step_index": 0,
+                "action_type": "tool_call",
+                "tool_or_skill": "search_file",
+                "params": {"pattern": "*.py", "recursive": True},
+                "result_summary": "found 5 files",
+                "success": True,
+                "latency_ms": 120,
+                "timestamp": "2026-03-01T10:00:00",
+            },
+            {
+                "step_index": 1,
+                "action_type": "tool_call",
+                "tool_or_skill": "read_file",
+                "params": {"filePath": "tests/test_agent.py"},
+                "result_summary": "read 119 lines",
+                "success": True,
+                "latency_ms": 30,
+                "timestamp": "2026-03-01T10:00:01",
+            },
+        ]
+
+    def test_record_action_chain(self):
+        from memabra.memory import ActionStore
+
+        store = ActionStore(embedding_fn=make_embedder())
+        mid = store.record_action_chain(
+            user_query="找到所有Python测试文件",
+            strategy_used="tool_use",
+            action_chain=self._sample_chain(),
+            final_response_summary="找到5个测试文件",
+            reward=0.9,
+            context_tags=["file_search", "python"],
+        )
+        assert mid is not None
+        mem = store.get(mid)
+        assert mem.total_steps == 2
+        assert set(mem.tools_used) == {"search_file", "read_file"}
+        assert mem.total_latency_ms == 150
+        assert mem.reward == 0.9
+
+    def test_find_similar_chains(self):
+        from memabra.memory import ActionStore
+
+        store = ActionStore(embedding_fn=make_embedder())
+        store.record_action_chain(
+            user_query="搜索项目中的测试文件",
+            strategy_used="tool_use",
+            action_chain=self._sample_chain(),
+            final_response_summary="找到文件",
+            reward=0.8,
+        )
+        store.record_action_chain(
+            user_query="做饭食谱",
+            strategy_used="direct_answer",
+            action_chain=[],
+            final_response_summary="给出食谱",
+            reward=0.5,
+        )
+        results = store.find_similar_chains("查找Python文件", top_k=2)
+        assert len(results) <= 2
+
+    def test_find_by_tool(self):
+        from memabra.memory import ActionStore
+
+        store = ActionStore(embedding_fn=make_embedder())
+        store.record_action_chain(
+            user_query="query1",
+            strategy_used="tool_use",
+            action_chain=self._sample_chain(),
+            final_response_summary="done",
+        )
+        matches = store.find_by_tool("search_file")
+        assert len(matches) == 1
+        assert matches[0].user_query == "query1"
+
+        no_matches = store.find_by_tool("nonexistent_tool")
+        assert len(no_matches) == 0
+
+    def test_find_successful_patterns(self):
+        from memabra.memory import ActionStore
+
+        store = ActionStore(embedding_fn=make_embedder())
+        store.record_action_chain(
+            user_query="good query",
+            strategy_used="tool_use",
+            action_chain=self._sample_chain(),
+            final_response_summary="great result",
+            reward=0.9,
+            success=True,
+        )
+        store.record_action_chain(
+            user_query="bad query",
+            strategy_used="tool_use",
+            action_chain=self._sample_chain(),
+            final_response_summary="poor result",
+            reward=0.1,
+            success=False,
+        )
+        patterns = store.find_successful_patterns("search_file", min_reward=0.5)
+        assert len(patterns) == 1
+        assert patterns[0].user_query == "good query"
+
+    def test_get_tool_stats(self):
+        from memabra.memory import ActionStore
+
+        store = ActionStore(embedding_fn=make_embedder())
+        store.record_action_chain(
+            user_query="q1",
+            strategy_used="tool_use",
+            action_chain=self._sample_chain(),
+            final_response_summary="ok",
+            reward=0.8,
+        )
+        stats = store.get_tool_stats()
+        assert "search_file" in stats
+        assert "read_file" in stats
+        assert stats["search_file"]["total_calls"] == 1
+        assert stats["search_file"]["success_rate"] == 1.0
+        assert stats["search_file"]["avg_latency_ms"] == 120.0
+
+
+class TestHierarchicalMemoryWithAction:
+    """Tests for HierarchicalMemory action memory integration."""
+
+    def test_retrieve_includes_action(self):
+        from memabra.memory import HierarchicalMemory
+
+        embed = make_embedder()
+        hm = HierarchicalMemory(embedding_fn=embed)
+
+        hm.action.record_action_chain(
+            user_query="search for test files",
+            strategy_used="tool_use",
+            action_chain=[{
+                "step_index": 0,
+                "action_type": "tool_call",
+                "tool_or_skill": "search_file",
+                "params": {},
+                "result_summary": "found files",
+                "success": True,
+                "latency_ms": 50,
+            }],
+            final_response_summary="found test files",
+            reward=0.9,
+        )
+
+        for strategy in ['direct_answer', 'search_required', 'tool_use']:
+            results = hm.retrieve("search test files", strategy, top_k=5)
+            assert 'action' in results
+
+    def test_tool_use_prioritizes_action(self):
+        from memabra.memory import HierarchicalMemory
+
+        embed = make_embedder()
+        hm = HierarchicalMemory(embedding_fn=embed)
+
+        hm.action.record_action_chain(
+            user_query="find Python files",
+            strategy_used="tool_use",
+            action_chain=[{
+                "step_index": 0,
+                "action_type": "tool_call",
+                "tool_or_skill": "search_file",
+                "params": {"pattern": "*.py"},
+                "result_summary": "found 10 files",
+                "success": True,
+                "latency_ms": 100,
+            }],
+            final_response_summary="listed Python files",
+            reward=0.85,
+        )
+
+        results = hm.retrieve("find Python files", "tool_use", top_k=5)
+        assert len(results['action']) > 0
+
+    def test_save_and_load_with_action(self, tmp_path):
+        from memabra.memory import HierarchicalMemory
+
+        embed = make_embedder()
+        hm = HierarchicalMemory(embedding_fn=embed)
+
+        hm.action.record_action_chain(
+            user_query="test query",
+            strategy_used="tool_use",
+            action_chain=[{
+                "step_index": 0,
+                "action_type": "tool_call",
+                "tool_or_skill": "grep",
+                "params": {"pattern": "TODO"},
+                "result_summary": "3 matches",
+                "success": True,
+                "latency_ms": 45,
+            }],
+            final_response_summary="found 3 TODOs",
+            reward=0.7,
+            context_tags=["code_search"],
+        )
+
+        path = str(tmp_path / "memories.json")
+        hm.save_to_disk(path)
+
+        hm2 = HierarchicalMemory(embedding_fn=embed)
+        hm2.load_from_disk(path)
+
+        assert len(hm2.action.memories) == 1
+        action_mem = list(hm2.action.memories.values())[0]
+        assert action_mem.user_query == "test query"
+        assert action_mem.tools_used == ["grep"]
+        assert action_mem.reward == 0.7
+        assert action_mem.context_tags == ["code_search"]
+        assert len(action_mem.action_chain) == 1

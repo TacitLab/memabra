@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 DATA_DIR = os.path.expanduser("~/.memabra")
 MODEL_PATH = os.path.join(DATA_DIR, "model.pt")

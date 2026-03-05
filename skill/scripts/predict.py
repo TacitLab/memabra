@@ -12,8 +12,8 @@ import json
 import os
 import sys
 
-# Ensure memabra is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+# Ensure memabra is importable (skill/memabra/ is the source)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 DATA_DIR = os.path.expanduser("~/.memabra")
 MODEL_PATH = os.path.join(DATA_DIR, "model.pt")

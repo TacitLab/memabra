@@ -146,7 +146,8 @@ class MemabraAgent:
             'memory_query_vector': prediction.memory_query_vector,
             'memories_retrieved': len(memories.get('episodic', [])) + 
                                   len(memories.get('semantic', [])) + 
-                                  len(memories.get('procedural', [])),
+                                  len(memories.get('procedural', [])) +
+                                  len(memories.get('action', [])),
             'assistant_response': response,
         }
         

@@ -1,20 +1,20 @@
 """
 Memabra: Bio-inspired memory and intuition system for AI agents.
 
-核心组件：
-- IntuitionNetwork: 神经网络直觉网络，用于策略选择和记忆查询向量生成
-- ImplicitEvaluator: 隐式反馈评估器，从用户行为中推断满意度
-- HierarchicalMemory: 分层记忆系统（情景/语义/程序）
-- DelayedRewardAssigner: 延迟奖励分配器
+OpenClaw Skill runtime modules:
+- IntuitionNetwork: Neural policy network for strategy selection + memory query generation
+- ImplicitEvaluator: Implicit feedback evaluator from user behavior
+- HierarchicalMemory: Hierarchical memory system (episodic / semantic / procedural)
+- MemabraAgent: Core agent integrating all modules
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .intuition_network import (
     IntuitionNetwork,
     StrategyPrediction,
     AdaptiveThreshold,
-    ExplorationController
+    ExplorationController,
 )
 from .feedback_evaluator import (
     ImplicitEvaluator,
@@ -22,7 +22,7 @@ from .feedback_evaluator import (
     SignalType,
     Interaction,
     DelayedRewardAssigner,
-    FeedbackCalibrator
+    FeedbackCalibrator,
 )
 from .memory import (
     HierarchicalMemory,
@@ -30,37 +30,36 @@ from .memory import (
     EpisodicMemory,
     SemanticMemory,
     ProceduralMemory,
+    ActionMemory,
+    ActionStep,
     EpisodicStore,
     SemanticStore,
-    ProceduralStore
+    ProceduralStore,
+    ActionStore,
 )
 from .agent import MemabraAgent
 
 __all__ = [
-    # 直觉网络
     "IntuitionNetwork",
     "StrategyPrediction",
     "AdaptiveThreshold",
     "ExplorationController",
-    
-    # 反馈系统
     "ImplicitEvaluator",
     "FeedbackSignal",
     "SignalType",
     "Interaction",
     "DelayedRewardAssigner",
     "FeedbackCalibrator",
-    
-    # 记忆系统
     "HierarchicalMemory",
     "Memory",
     "EpisodicMemory",
     "SemanticMemory",
     "ProceduralMemory",
+    "ActionMemory",
+    "ActionStep",
     "EpisodicStore",
     "SemanticStore",
     "ProceduralStore",
-    
-    # 完整代理
+    "ActionStore",
     "MemabraAgent",
 ]

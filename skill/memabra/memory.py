@@ -50,6 +50,47 @@ class ProceduralMemory(Memory):
     action: str = ""
     success_rate: float = 0.0
     avg_reward: float = 0.0
+    # Extended: structured tool experience
+    tool_name: Optional[str] = None
+    tool_params_schema: Optional[Dict[str, Any]] = None
+    total_calls: int = 0
+    avg_latency_ms: float = 0.0
+    context_tags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ActionStep:
+    """A single step in an action chain."""
+    step_index: int = 0
+    action_type: str = ""  # "tool_call", "skill_call", "memory_retrieve", "llm_generate"
+    tool_or_skill: str = ""  # tool/skill name
+    params: Dict[str, Any] = field(default_factory=dict)
+    result_summary: str = ""
+    success: bool = True
+    latency_ms: float = 0.0
+    timestamp: str = ""
+
+
+@dataclass
+class ActionMemory(Memory):
+    """
+    Memory of complete action chains — records structured tool/skill usage.
+    
+    This is the 'broad-sense' memory that captures HOW the agent solved problems,
+    not just WHAT was said. Each ActionMemory records a full chain:
+    user_query → step1 (tool_call) → step2 (skill_call) → ... → final_response
+    """
+    type: str = "action"
+    user_query: str = ""
+    strategy_used: str = ""
+    action_chain: List[Dict[str, Any]] = field(default_factory=list)  # serialized ActionSteps
+    final_response_summary: str = ""
+    total_steps: int = 0
+    total_latency_ms: float = 0.0
+    reward: float = 0.0
+    context_tags: List[str] = field(default_factory=list)
+    tools_used: List[str] = field(default_factory=list)  # quick lookup list
+    success: bool = True
 
 
 class MemoryStore:
@@ -192,15 +233,129 @@ class ProceduralStore(MemoryStore):
         return matches
 
 
+class ActionStore(MemoryStore):
+    """Store for action chain memories — records structured tool/skill usage."""
+    
+    def record_action_chain(
+        self,
+        user_query: str,
+        strategy_used: str,
+        action_chain: List[Dict[str, Any]],
+        final_response_summary: str,
+        reward: float = 0.0,
+        context_tags: Optional[List[str]] = None,
+        success: bool = True,
+    ) -> str:
+        """
+        Record a complete action chain from a single interaction.
+        
+        Args:
+            user_query: The original user input
+            strategy_used: Strategy selected by intuition network
+            action_chain: List of ActionStep dicts, each containing:
+                - step_index, action_type, tool_or_skill, params,
+                  result_summary, success, latency_ms, timestamp
+            final_response_summary: Summary of the final response
+            reward: Feedback reward for this chain
+            context_tags: Tags for retrieval (e.g., ["file_search", "python"])
+            success: Whether the overall chain succeeded
+        """
+        tools_used = list({
+            step.get('tool_or_skill', '')
+            for step in action_chain
+            if step.get('tool_or_skill')
+        })
+        total_latency = sum(step.get('latency_ms', 0) for step in action_chain)
+        
+        content = f"Query: {user_query}\nTools: {', '.join(tools_used)}\nResult: {final_response_summary}"
+        embedding = self.embed(content) if self.embed else None
+        
+        memory = ActionMemory(
+            content=content,
+            embedding=embedding,
+            user_query=user_query,
+            strategy_used=strategy_used,
+            action_chain=action_chain,
+            final_response_summary=final_response_summary,
+            total_steps=len(action_chain),
+            total_latency_ms=total_latency,
+            reward=reward,
+            context_tags=context_tags or [],
+            tools_used=tools_used,
+            success=success,
+        )
+        return self.add(memory)
+    
+    def find_similar_chains(self, query_text: str, top_k: int = 5) -> List[ActionMemory]:
+        """Find action chains similar to the given query using embedding search."""
+        if not self.embed:
+            return []
+        query_emb = self.embed(query_text)
+        results = self.search(query_emb, top_k)
+        return [m for m in results if isinstance(m, ActionMemory)]
+    
+    def find_by_tool(self, tool_name: str, top_k: int = 10) -> List[ActionMemory]:
+        """Find action chains that used a specific tool."""
+        matches = []
+        for mem in self.memories.values():
+            if isinstance(mem, ActionMemory) and tool_name in mem.tools_used:
+                matches.append(mem)
+        matches.sort(key=lambda m: m.timestamp, reverse=True)
+        return matches[:top_k]
+    
+    def find_successful_patterns(self, tool_name: str, min_reward: float = 0.5) -> List[ActionMemory]:
+        """Find high-reward action chains for a tool — learn what works."""
+        return [
+            m for m in self.memories.values()
+            if isinstance(m, ActionMemory)
+            and tool_name in m.tools_used
+            and m.reward >= min_reward
+            and m.success
+        ]
+    
+    def get_tool_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Aggregate statistics per tool across all action memories."""
+        stats: Dict[str, Dict[str, Any]] = {}
+        for mem in self.memories.values():
+            if not isinstance(mem, ActionMemory):
+                continue
+            for step in mem.action_chain:
+                tool = step.get('tool_or_skill', '')
+                if not tool:
+                    continue
+                if tool not in stats:
+                    stats[tool] = {
+                        'total_calls': 0,
+                        'successes': 0,
+                        'total_latency_ms': 0.0,
+                        'total_reward': 0.0,
+                    }
+                stats[tool]['total_calls'] += 1
+                if step.get('success', True):
+                    stats[tool]['successes'] += 1
+                stats[tool]['total_latency_ms'] += step.get('latency_ms', 0)
+                stats[tool]['total_reward'] += mem.reward
+        
+        # Compute averages
+        for tool, s in stats.items():
+            n = s['total_calls']
+            s['success_rate'] = s['successes'] / n if n else 0.0
+            s['avg_latency_ms'] = s['total_latency_ms'] / n if n else 0.0
+            s['avg_reward'] = s['total_reward'] / n if n else 0.0
+        
+        return stats
+
+
 class HierarchicalMemory:
     """
-    Hierarchical memory system combining episodic, semantic, and procedural memory.
+    Hierarchical memory system combining episodic, semantic, procedural, and action memory.
     """
     
     def __init__(self, embedding_fn=None):
         self.episodic = EpisodicStore(embedding_fn)
         self.semantic = SemanticStore(embedding_fn)
         self.procedural = ProceduralStore(embedding_fn)
+        self.action = ActionStore(embedding_fn)
         self.embed = embedding_fn
     
     def retrieve(self, query_text: str, strategy_id: str, 
@@ -214,14 +369,15 @@ class HierarchicalMemory:
             top_k: Number of memories to retrieve per type
             
         Returns:
-            Dict with keys 'episodic', 'semantic', 'procedural'
+            Dict with keys 'episodic', 'semantic', 'procedural', 'action'
         """
         query_emb = self.embed(query_text) if self.embed else None
         
         results = {
             'episodic': [],
             'semantic': [],
-            'procedural': []
+            'procedural': [],
+            'action': [],
         }
         
         if strategy_id == 'direct_answer':
@@ -229,15 +385,19 @@ class HierarchicalMemory:
             if query_emb:
                 results['semantic'] = self.semantic.search(query_emb, top_k)
             results['procedural'] = self.procedural.find_matching_skills(query_text)[:top_k]
+            # Also check action history for similar queries
+            results['action'] = self.action.find_similar_chains(query_text, top_k // 2)
         
         elif strategy_id == 'search_required':
             # Prioritize episodic memory (past interactions)
             if query_emb:
                 results['episodic'] = self.episodic.search(query_emb, top_k)
                 results['semantic'] = self.semantic.search(query_emb, top_k // 2)
+            results['action'] = self.action.find_similar_chains(query_text, top_k // 2)
         
         elif strategy_id == 'tool_use':
-            # Prioritize procedural memory (skills)
+            # Prioritize action memory (past tool usage) + procedural memory
+            results['action'] = self.action.find_similar_chains(query_text, top_k)
             results['procedural'] = self.procedural.find_matching_skills(query_text)
             if query_emb:
                 results['episodic'] = self.episodic.search(query_emb, top_k // 2)
@@ -274,6 +434,7 @@ class HierarchicalMemory:
             'episodic': [self._memory_to_dict(m) for m in self.episodic.memories.values()],
             'semantic': [self._memory_to_dict(m) for m in self.semantic.memories.values()],
             'procedural': [self._memory_to_dict(m) for m in self.procedural.memories.values()],
+            'action': [self._memory_to_dict(m) for m in self.action.memories.values()],
         }
         with open(path, 'w') as f:
             json.dump(data, f, indent=2, default=str)
@@ -288,6 +449,7 @@ class HierarchicalMemory:
             'episodic': EpisodicMemory,
             'semantic': SemanticMemory,
             'procedural': ProceduralMemory,
+            'action': ActionMemory,
             'lesson': EpisodicMemory,
             'base': Memory,
         }
@@ -296,6 +458,7 @@ class HierarchicalMemory:
             'episodic': self.episodic,
             'semantic': self.semantic,
             'procedural': self.procedural,
+            'action': self.action,
         }
         
         for store_key, entries in data.items():
@@ -333,6 +496,23 @@ class HierarchicalMemory:
                     kwargs['action'] = entry.get('metadata', {}).get('action', '')
                     kwargs['success_rate'] = entry.get('metadata', {}).get('success_rate', 0.0)
                     kwargs['avg_reward'] = entry.get('metadata', {}).get('avg_reward', 0.0)
+                    kwargs['tool_name'] = entry.get('metadata', {}).get('tool_name')
+                    kwargs['tool_params_schema'] = entry.get('metadata', {}).get('tool_params_schema')
+                    kwargs['total_calls'] = entry.get('metadata', {}).get('total_calls', 0)
+                    kwargs['avg_latency_ms'] = entry.get('metadata', {}).get('avg_latency_ms', 0.0)
+                    kwargs['context_tags'] = entry.get('metadata', {}).get('context_tags', [])
+                elif cls == ActionMemory:
+                    meta = entry.get('metadata', {})
+                    kwargs['user_query'] = meta.get('user_query', '')
+                    kwargs['strategy_used'] = meta.get('strategy_used', '')
+                    kwargs['action_chain'] = meta.get('action_chain', [])
+                    kwargs['final_response_summary'] = meta.get('final_response_summary', '')
+                    kwargs['total_steps'] = meta.get('total_steps', 0)
+                    kwargs['total_latency_ms'] = meta.get('total_latency_ms', 0.0)
+                    kwargs['reward'] = meta.get('reward', 0.0)
+                    kwargs['context_tags'] = meta.get('context_tags', [])
+                    kwargs['tools_used'] = meta.get('tools_used', [])
+                    kwargs['success'] = meta.get('success', True)
                 
                 memory = cls(**kwargs)
                 store.add(memory)
@@ -351,7 +531,19 @@ class HierarchicalMemory:
         }
         
         # Persist type-specific fields inside metadata for reconstruction
-        if isinstance(memory, EpisodicMemory):
+        if isinstance(memory, ActionMemory):
+            # Check ActionMemory before EpisodicMemory since it's not a subclass
+            result['metadata']['user_query'] = memory.user_query
+            result['metadata']['strategy_used'] = memory.strategy_used
+            result['metadata']['action_chain'] = memory.action_chain
+            result['metadata']['final_response_summary'] = memory.final_response_summary
+            result['metadata']['total_steps'] = memory.total_steps
+            result['metadata']['total_latency_ms'] = memory.total_latency_ms
+            result['metadata']['reward'] = memory.reward
+            result['metadata']['context_tags'] = memory.context_tags
+            result['metadata']['tools_used'] = memory.tools_used
+            result['metadata']['success'] = memory.success
+        elif isinstance(memory, EpisodicMemory):
             result['metadata']['outcome'] = memory.outcome
             result['metadata']['strategy_used'] = memory.strategy_used
         elif isinstance(memory, SemanticMemory):
@@ -366,5 +558,10 @@ class HierarchicalMemory:
             result['metadata']['action'] = memory.action
             result['metadata']['success_rate'] = memory.success_rate
             result['metadata']['avg_reward'] = memory.avg_reward
+            result['metadata']['tool_name'] = memory.tool_name
+            result['metadata']['tool_params_schema'] = memory.tool_params_schema
+            result['metadata']['total_calls'] = memory.total_calls
+            result['metadata']['avg_latency_ms'] = memory.avg_latency_ms
+            result['metadata']['context_tags'] = memory.context_tags
         
         return result

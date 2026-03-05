@@ -1,65 +1,7 @@
-"""Tests for Intuition Network modules."""
+"""Tests for Intuition Network (PyTorch-based)."""
 
 import numpy as np
 import pytest
-
-
-class TestSimpleIntuitionNetwork:
-    """Tests for the cosine-similarity based intuition network."""
-
-    def test_init(self):
-        from memabra.intuition import SimpleIntuitionNetwork
-
-        net = SimpleIntuitionNetwork(embedding_dim=64)
-        assert len(net.strategies) == 4
-        assert all(s in net.strategies for s in [
-            'direct_answer', 'search_required', 'tool_use', 'clarification'
-        ])
-
-    def test_predict_returns_valid_strategy(self):
-        from memabra.intuition import SimpleIntuitionNetwork
-
-        net = SimpleIntuitionNetwork(embedding_dim=64)
-        emb = np.random.randn(64)
-        strategy_id, confidence, similarities = net.predict(emb)
-
-        assert strategy_id in net.strategies
-        assert 0 <= confidence <= 1
-        assert len(similarities) == 4
-        assert all(0 <= v <= 1 for v in similarities.values())
-
-    def test_update_changes_strategy_vector(self):
-        from memabra.intuition import SimpleIntuitionNetwork
-
-        net = SimpleIntuitionNetwork(embedding_dim=64)
-        emb = np.random.randn(64)
-
-        before = net.strategies['direct_answer'].copy()
-        net.update(emb, 'direct_answer', reward=1.0, lr=0.1)
-        after = net.strategies['direct_answer']
-
-        assert not np.allclose(before, after), "Strategy vector should change after update"
-
-    def test_update_tracks_rewards(self):
-        from memabra.intuition import SimpleIntuitionNetwork
-
-        net = SimpleIntuitionNetwork(embedding_dim=64)
-        emb = np.random.randn(64)
-
-        net.update(emb, 'direct_answer', reward=0.5)
-        net.update(emb, 'direct_answer', reward=-0.3)
-
-        stats = net.get_strategy_stats()
-        assert stats['direct_answer']['count'] == 2
-        assert abs(stats['direct_answer']['avg_reward'] - 0.1) < 1e-6
-
-    def test_unknown_strategy_update_noop(self):
-        from memabra.intuition import SimpleIntuitionNetwork
-
-        net = SimpleIntuitionNetwork(embedding_dim=64)
-        emb = np.random.randn(64)
-        # Should not raise
-        net.update(emb, 'nonexistent_strategy', reward=1.0)
 
 
 class TestIntuitionNetwork:
@@ -77,6 +19,18 @@ class TestIntuitionNetwork:
         assert len(pred.memory_query_vector) == 64
         assert len(pred.all_scores) == 4
 
+    def test_predict_returns_valid_strategy(self):
+        from memabra.intuition_network import IntuitionNetwork
+
+        net = IntuitionNetwork(input_dim=64, hidden_dim=32, num_strategies=4, memory_query_dim=64)
+        emb = np.random.randn(64).tolist()
+        pred = net.predict(emb)
+
+        assert pred.strategy_id in [
+            'direct_answer', 'search_required', 'tool_use', 'clarification'
+        ]
+        assert all(0 <= v <= 1 for v in pred.all_scores.values())
+
     def test_update_reduces_loss(self):
         from memabra.intuition_network import IntuitionNetwork
 
@@ -89,13 +43,26 @@ class TestIntuitionNetwork:
         assert 'temperature' in stats
         assert net.training_stats['updates'] == 1
 
+    def test_multiple_updates_track_stats(self):
+        from memabra.intuition_network import IntuitionNetwork
+
+        net = IntuitionNetwork(input_dim=64, hidden_dim=32, num_strategies=4, memory_query_dim=64)
+        net.setup_optimizer()
+        emb = np.random.randn(64).tolist()
+
+        net.update(emb, 'direct_answer', reward=0.5)
+        net.update(emb, 'search_required', reward=-0.3)
+
+        assert net.training_stats['updates'] == 2
+        assert net.training_stats['strategy_distribution']['direct_answer'] == 1
+        assert net.training_stats['strategy_distribution']['search_required'] == 1
+
     def test_save_and_load(self, tmp_path):
         from memabra.intuition_network import IntuitionNetwork
 
         net = IntuitionNetwork(input_dim=64, hidden_dim=32, num_strategies=4, memory_query_dim=64)
         net.setup_optimizer()
 
-        # Do some updates
         emb = np.random.randn(64).tolist()
         net.update(emb, 'direct_answer', reward=1.0)
 
@@ -106,7 +73,6 @@ class TestIntuitionNetwork:
         assert loaded.training_stats['updates'] == 1
         assert loaded.input_dim == 64
 
-        # Predictions should be consistent
         pred_orig = net.predict(emb)
         pred_loaded = loaded.predict(emb)
         assert pred_orig.strategy_id == pred_loaded.strategy_id
@@ -124,6 +90,28 @@ class TestIntuitionNetwork:
         assert isinstance(loss, float)
         assert loss >= 0
 
+    def test_get_strategy_weights(self):
+        from memabra.intuition_network import IntuitionNetwork
+
+        net = IntuitionNetwork(input_dim=64, hidden_dim=32, num_strategies=4, memory_query_dim=64)
+        weights = net.get_strategy_weights()
+
+        assert len(weights) == 4
+        assert all(s in weights for s in net.strategy_names)
+
+    def test_custom_strategy_names(self):
+        from memabra.intuition_network import IntuitionNetwork
+
+        names = ['alpha', 'beta', 'gamma', 'delta']
+        net = IntuitionNetwork(
+            input_dim=64, hidden_dim=32, num_strategies=4,
+            memory_query_dim=64, strategy_names=names
+        )
+        assert net.strategy_names == names
+
+        pred = net.predict(np.random.randn(64).tolist())
+        assert pred.strategy_id in names
+
 
 class TestAdaptiveThreshold:
     """Tests for AdaptiveThreshold."""
@@ -140,12 +128,18 @@ class TestAdaptiveThreshold:
 
         at = AdaptiveThreshold(initial=0.7, window_size=20)
 
-        # Simulate many high-confidence failures
         for _ in range(20):
             at.update(confidence=0.8, success=False)
 
-        # Threshold should increase
         assert at.threshold > 0.7
+
+    def test_get_stats(self):
+        from memabra.intuition_network import AdaptiveThreshold
+
+        at = AdaptiveThreshold(initial=0.7)
+        stats = at.get_stats()
+        assert stats['threshold'] == 0.7
+        assert stats['samples'] == 0
 
 
 class TestExplorationController:
@@ -155,12 +149,11 @@ class TestExplorationController:
         from memabra.intuition_network import IntuitionNetwork, ExplorationController
 
         net = IntuitionNetwork(input_dim=64, hidden_dim=32, num_strategies=4, memory_query_dim=64)
-        controller = ExplorationController(net, threshold=0.0)  # Very low threshold
+        controller = ExplorationController(net, threshold=0.0)
 
         emb = np.random.randn(64).tolist()
         path_type, primary, all_preds = controller.decide_path(emb)
 
-        # With threshold=0, should almost always be fast
         assert path_type in ('fast', 'exploration')
         assert primary.strategy_id in net.strategy_names
 
@@ -168,10 +161,18 @@ class TestExplorationController:
         from memabra.intuition_network import IntuitionNetwork, ExplorationController
 
         net = IntuitionNetwork(input_dim=64, hidden_dim=32, num_strategies=4, memory_query_dim=64)
-        controller = ExplorationController(net, threshold=0.99)  # Very high threshold
+        controller = ExplorationController(net, threshold=0.99)
 
         emb = np.random.randn(64).tolist()
         path_type, primary, all_preds = controller.decide_path(emb)
 
         assert path_type == 'exploration'
         assert len(all_preds) == 4
+
+    def test_report_outcome(self):
+        from memabra.intuition_network import IntuitionNetwork, ExplorationController
+
+        net = IntuitionNetwork(input_dim=64, hidden_dim=32, num_strategies=4, memory_query_dim=64)
+        controller = ExplorationController(net, threshold=0.7)
+        controller.report_outcome(0.8, True)
+        assert len(controller.adaptive_threshold.history) == 1

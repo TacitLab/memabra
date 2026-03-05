@@ -12,11 +12,20 @@ Memabra Skill - 记忆管理脚本
     # 存储程序记忆
     python3 memorize.py --action store --type procedural --name "技能名" --trigger "触发词1,触发词2" --action-desc "执行动作"
 
+    # 存储动作链记忆（广义记忆：记录 tool/skill 使用经验）
+    python3 memorize.py --action store --type action --query "用户的问题" --strategy "tool_use" --chain '[{"step_index":0,"action_type":"tool_call","tool_or_skill":"search_file","params":{"pattern":"*.py"},"result_summary":"found 5 files","success":true,"latency_ms":120}]' --response-summary "找到5个Python文件" --reward 0.8 --tags "file_search,python"
+
     # 搜索记忆
     python3 memorize.py --action search --query "搜索内容" --top-k 5
 
     # 列出最近记忆
     python3 memorize.py --action recent --top-k 10
+
+    # 查看工具使用统计
+    python3 memorize.py --action tool-stats
+
+    # 查找某工具的成功案例
+    python3 memorize.py --action tool-patterns --tool-name "search_file" --min-reward 0.5
 """
 
 import argparse
@@ -24,7 +33,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 DATA_DIR = os.path.expanduser("~/.memabra")
 MEMORY_PATH = os.path.join(DATA_DIR, "memories.json")
@@ -90,6 +99,64 @@ def store_procedural(memory, name: str, triggers: str, action_desc: str) -> dict
     return {"status": "ok", "type": "procedural", "id": mem_id}
 
 
+def store_action(memory, query: str, strategy: str, chain_json: str,
+                 response_summary: str, reward: float = 0.0,
+                 tags: str = "", success: bool = True) -> dict:
+    """Store an action chain memory (broad-sense memory)."""
+    chain = json.loads(chain_json)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    
+    mem_id = memory.action.record_action_chain(
+        user_query=query,
+        strategy_used=strategy,
+        action_chain=chain,
+        final_response_summary=response_summary,
+        reward=reward,
+        context_tags=tag_list,
+        success=success,
+    )
+    save_memory(memory)
+    return {"status": "ok", "type": "action", "id": mem_id}
+
+
+def get_tool_stats(memory) -> dict:
+    """Get aggregated tool usage statistics."""
+    stats = memory.action.get_tool_stats()
+    return {
+        "tool_stats": {
+            tool: {
+                "total_calls": s["total_calls"],
+                "success_rate": round(s["success_rate"], 3),
+                "avg_latency_ms": round(s["avg_latency_ms"], 1),
+                "avg_reward": round(s["avg_reward"], 3),
+            }
+            for tool, s in stats.items()
+        },
+        "total_tools": len(stats),
+    }
+
+
+def get_tool_patterns(memory, tool_name: str, min_reward: float = 0.5) -> dict:
+    """Find successful usage patterns for a specific tool."""
+    patterns = memory.action.find_successful_patterns(tool_name, min_reward)
+    return {
+        "tool": tool_name,
+        "min_reward": min_reward,
+        "patterns": [
+            {
+                "id": m.id,
+                "user_query": m.user_query,
+                "tools_used": m.tools_used,
+                "total_steps": m.total_steps,
+                "reward": round(m.reward, 3),
+                "action_chain": m.action_chain,
+            }
+            for m in patterns
+        ],
+        "count": len(patterns),
+    }
+
+
 def search_memories(memory, query: str, top_k: int = 5) -> dict:
     """Search across all memory types."""
     results = memory.retrieve(
@@ -134,8 +201,10 @@ def recent_memories(memory, top_k: int = 10) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Memabra Memory Management")
-    parser.add_argument("--action", required=True, choices=["store", "search", "recent"])
-    parser.add_argument("--type", choices=["episodic", "semantic", "procedural"], default="episodic")
+    parser.add_argument("--action", required=True,
+                        choices=["store", "search", "recent", "tool-stats", "tool-patterns"])
+    parser.add_argument("--type", choices=["episodic", "semantic", "procedural", "action"],
+                        default="episodic")
     parser.add_argument("--content", type=str, help="Content for episodic memory")
     parser.add_argument("--subject", type=str, help="Subject for semantic memory")
     parser.add_argument("--predicate", type=str, help="Predicate for semantic memory")
@@ -143,7 +212,17 @@ def main():
     parser.add_argument("--name", type=str, help="Skill name for procedural memory")
     parser.add_argument("--trigger", type=str, help="Comma-separated triggers for procedural memory")
     parser.add_argument("--action-desc", type=str, help="Action description for procedural memory")
-    parser.add_argument("--query", type=str, help="Search query")
+    # Action memory arguments
+    parser.add_argument("--query", type=str, help="User query (for action memory or search)")
+    parser.add_argument("--strategy", type=str, help="Strategy used (for action memory)")
+    parser.add_argument("--chain", type=str, help="Action chain JSON (for action memory)")
+    parser.add_argument("--response-summary", type=str, help="Response summary (for action memory)")
+    parser.add_argument("--reward", type=float, default=0.0, help="Reward value (for action memory)")
+    parser.add_argument("--tags", type=str, default="", help="Comma-separated context tags")
+    parser.add_argument("--success", type=str, default="true", help="Whether chain succeeded (true/false)")
+    # Tool analysis arguments
+    parser.add_argument("--tool-name", type=str, help="Tool name for pattern analysis")
+    parser.add_argument("--min-reward", type=float, default=0.5, help="Min reward for pattern filtering")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results")
     args = parser.parse_args()
 
@@ -165,6 +244,15 @@ def main():
                 print(json.dumps({"error": "--name, --trigger, --action-desc are required"}))
                 sys.exit(1)
             result = store_procedural(memory, args.name, args.trigger, args.action_desc)
+        elif args.type == "action":
+            if not all([args.query, args.strategy, args.chain, args.response_summary]):
+                print(json.dumps({"error": "--query, --strategy, --chain, --response-summary are required for action memory"}))
+                sys.exit(1)
+            success = args.success.lower() in ("true", "1", "yes")
+            result = store_action(
+                memory, args.query, args.strategy, args.chain,
+                args.response_summary, args.reward, args.tags, success
+            )
         else:
             result = {"error": f"Unknown type: {args.type}"}
 
@@ -176,6 +264,15 @@ def main():
 
     elif args.action == "recent":
         result = recent_memories(memory, args.top_k)
+
+    elif args.action == "tool-stats":
+        result = get_tool_stats(memory)
+
+    elif args.action == "tool-patterns":
+        if not args.tool_name:
+            print(json.dumps({"error": "--tool-name is required for tool-patterns"}))
+            sys.exit(1)
+        result = get_tool_patterns(memory, args.tool_name, args.min_reward)
 
     else:
         result = {"error": f"Unknown action: {args.action}"}
